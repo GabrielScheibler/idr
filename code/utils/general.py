@@ -37,8 +37,12 @@ def split_input(model_input, total_pixels):
 def merge_output(res, total_pixels, batch_size):
     ''' Merge the split output. '''
 
+    for entry in res[0]:
+        print(res[0][entry].shape)
+
     model_outputs = {}
     for entry in res[0]:
+        print(res[0][entry].shape)
         if res[0][entry] is None:
             continue
         if len(res[0][entry].shape) == 1:

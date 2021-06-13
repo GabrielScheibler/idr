@@ -16,6 +16,12 @@ def plot(model, indices, model_outputs ,pose, rgb_gt, path, epoch, img_res, plot
     points = model_outputs['points'].reshape(batch_size, num_samples, 3)
     rgb_eval = model_outputs['rgb_values']
     rgb_eval = rgb_eval.reshape(batch_size, num_samples, 3)
+    rgb_eval_albedo = model_outputs['rgb_albedo']
+    rgb_eval_albedo = rgb_eval_albedo.reshape(batch_size, num_samples, 3)
+    rgb_eval_shading = model_outputs['rgb_shading']
+    rgb_eval_shading = rgb_eval_shading.reshape(batch_size, num_samples, 3)
+    rgb_eval_specular = model_outputs['rgb_specular']
+    rgb_eval_specular = rgb_eval_specular.reshape(batch_size, num_samples, 3)
 
     depth = torch.ones(batch_size * num_samples).cuda().float() * max_depth
     depth[network_object_mask] = rend_util.get_depth(points, pose).reshape(-1)[network_object_mask]
@@ -26,6 +32,9 @@ def plot(model, indices, model_outputs ,pose, rgb_gt, path, epoch, img_res, plot
 
     # plot rendered images
     plot_images(rgb_eval, rgb_gt, path, epoch, plot_nimgs, img_res)
+    plot_images_albedo(rgb_eval_albedo, rgb_gt, path, epoch, plot_nimgs, img_res)
+    plot_images_shading(rgb_eval_shading, rgb_gt, path, epoch, plot_nimgs, img_res)
+    plot_images_specular(rgb_eval_specular, rgb_gt, path, epoch, plot_nimgs, img_res)
 
     # plot depth maps
     plot_depth_maps(depth, path, epoch, plot_nimgs, img_res)
@@ -304,6 +313,63 @@ def plot_images(rgb_points, ground_true, path, epoch, plot_nrow, img_res):
 
     img = Image.fromarray(tensor)
     img.save('{0}/rendering_{1}.png'.format(path, epoch))
+
+def plot_images_albedo(rgb_points, ground_true, path, epoch, plot_nrow, img_res):
+    ground_true = (ground_true.cuda() + 1.) / 2.
+    rgb_points = (rgb_points + 1. ) / 2.
+
+    output_vs_gt = torch.cat((rgb_points, ground_true), dim=0)
+    output_vs_gt_plot = lin2img(output_vs_gt, img_res)
+
+    tensor = torchvision.utils.make_grid(output_vs_gt_plot,
+                                         scale_each=False,
+                                         normalize=False,
+                                         nrow=plot_nrow).cpu().detach().numpy()
+
+    tensor = tensor.transpose(1, 2, 0)
+    scale_factor = 255
+    tensor = (tensor * scale_factor).astype(np.uint8)
+
+    img = Image.fromarray(tensor)
+    img.save('{0}/rendering_albedo_{1}.png'.format(path, epoch))
+
+def plot_images_shading(rgb_points, ground_true, path, epoch, plot_nrow, img_res):
+    ground_true = (ground_true.cuda() + 1.) / 2.
+    rgb_points = (rgb_points + 1. ) / 2.
+
+    output_vs_gt = torch.cat((rgb_points, ground_true), dim=0)
+    output_vs_gt_plot = lin2img(output_vs_gt, img_res)
+
+    tensor = torchvision.utils.make_grid(output_vs_gt_plot,
+                                         scale_each=False,
+                                         normalize=False,
+                                         nrow=plot_nrow).cpu().detach().numpy()
+
+    tensor = tensor.transpose(1, 2, 0)
+    scale_factor = 255
+    tensor = (tensor * scale_factor).astype(np.uint8)
+
+    img = Image.fromarray(tensor)
+    img.save('{0}/rendering_shading_{1}.png'.format(path, epoch))
+
+def plot_images_specular(rgb_points, ground_true, path, epoch, plot_nrow, img_res):
+    ground_true = (ground_true.cuda() + 1.) / 2.
+    rgb_points = (rgb_points + 1. ) / 2.
+
+    output_vs_gt = torch.cat((rgb_points, ground_true), dim=0)
+    output_vs_gt_plot = lin2img(output_vs_gt, img_res)
+
+    tensor = torchvision.utils.make_grid(output_vs_gt_plot,
+                                         scale_each=False,
+                                         normalize=False,
+                                         nrow=plot_nrow).cpu().detach().numpy()
+
+    tensor = tensor.transpose(1, 2, 0)
+    scale_factor = 255
+    tensor = (tensor * scale_factor).astype(np.uint8)
+
+    img = Image.fromarray(tensor)
+    img.save('{0}/rendering_specular_{1}.png'.format(path, epoch))
 
 def lin2img(tensor, img_res):
     batch_size, num_samples, channels = tensor.shape

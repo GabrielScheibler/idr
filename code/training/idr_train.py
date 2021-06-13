@@ -227,6 +227,9 @@ class IDRTrainRunner():
                     res.append({
                         'points': out['points'].detach(),
                         'rgb_values': out['rgb_values'].detach(),
+                        'rgb_albedo': out['rgb_albedo'].detach(),
+                        'rgb_shading': out['rgb_shading'].detach(),
+                        'rgb_specular': out['rgb_specular'].detach(),
                         'network_object_mask': out['network_object_mask'].detach(),
                         'object_mask': out['object_mask'].detach()
                     })
@@ -279,10 +282,11 @@ class IDRTrainRunner():
                     self.optimizer_cam.step()
 
                 print(
-                    '{0} [{1}] ({2}/{3}): loss = {4}, rgb_loss = {5}, eikonal_loss = {6}, mask_loss = {7}, alpha = {8}, lr = {9}'
+                    '{0} [{1}] ({2}/{3}): loss = {4}, rgb_loss = {5}, eikonal_loss = {6}, specular_loss = {7}, mask_loss = {8}, alpha = {9}, lr = {10}'
                         .format(self.expname, epoch, data_index, self.n_batches, loss.item(),
                                 loss_output['rgb_loss'].item(),
                                 loss_output['eikonal_loss'].item(),
+                                loss_output['specular_loss'].item(),
                                 loss_output['mask_loss'].item(),
                                 self.loss.alpha,
                                 self.scheduler.get_lr()[0]))

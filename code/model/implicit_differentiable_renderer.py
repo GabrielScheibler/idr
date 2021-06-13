@@ -104,30 +104,73 @@ class RenderingNetwork(nn.Module):
             d_in,
             d_out,
             dims,
+            dims_albedo,
+            dims_shading,
+            dims_specular,
             weight_norm=True,
-            multires_view=0
+            multires_view=0,
+            multires=0
     ):
         super().__init__()
 
         self.mode = mode
-        dims = [d_in + feature_vector_size] + dims + [d_out]
+        dim_points = 3
+        dim_normals = 3
+        dim_view_dirs = 3
 
         self.embedview_fn = None
         if multires_view > 0:
             embedview_fn, input_ch = get_embedder(multires_view)
             self.embedview_fn = embedview_fn
-            dims[0] += (input_ch - 3)
+            dim_view_dirs = input_ch
 
-        self.num_layers = len(dims)
+        self.embed_fn = None
+        if multires > 0:
+            embed_fn, input_ch = get_embedder(multires)
+            self.embed_fn = embed_fn
+            dim_points = input_ch
 
-        for l in range(0, self.num_layers - 1):
-            out_dim = dims[l + 1]
-            lin = nn.Linear(dims[l], out_dim)
+        if self.mode == 'no_view_dir':
+            dim_view_dirs = 0
+        elif self.mode == 'no_normal':
+            dim_normals = 0
+
+        dims = [d_in + feature_vector_size] + dims + [d_out]
+        dims_albedo = [dim_points] + dims_albedo + [3]
+        dims_shading = [dim_points + feature_vector_size] + dims_shading + [1]
+        dims_specular = [dim_points + dim_normals + dim_view_dirs + feature_vector_size] + dims_specular + [3]
+
+
+        self.num_layers_albedo = len(dims_albedo)
+        self.num_layers_shading = len(dims_shading)
+        self.num_layers_specular = len(dims_specular)
+
+        for l in range(0, self.num_layers_albedo - 1):
+            out_dim = dims_albedo[l + 1]
+            lin = nn.Linear(dims_albedo[l], out_dim)
 
             if weight_norm:
                 lin = nn.utils.weight_norm(lin)
 
-            setattr(self, "lin" + str(l), lin)
+            setattr(self, "lin_albedo" + str(l), lin)
+
+        for l in range(0, self.num_layers_shading - 1):
+            out_dim = dims_shading[l + 1]
+            lin = nn.Linear(dims_shading[l], out_dim)
+
+            if weight_norm:
+                lin = nn.utils.weight_norm(lin)
+
+            setattr(self, "lin_shading" + str(l), lin)
+
+        for l in range(0, self.num_layers_specular - 1):
+            out_dim = dims_specular[l + 1]
+            lin = nn.Linear(dims_specular[l], out_dim)
+
+            if weight_norm:
+                lin = nn.utils.weight_norm(lin)
+
+            setattr(self, "lin_specular" + str(l), lin)
 
         self.relu = nn.ReLU()
         self.tanh = nn.Tanh()
@@ -136,6 +179,9 @@ class RenderingNetwork(nn.Module):
         if self.embedview_fn is not None:
             view_dirs = self.embedview_fn(view_dirs)
 
+        if self.embed_fn is not None:
+            points = self.embed_fn(points)
+
         if self.mode == 'idr':
             rendering_input = torch.cat([points, view_dirs, normals, feature_vectors], dim=-1)
         elif self.mode == 'no_view_dir':
@@ -143,18 +189,48 @@ class RenderingNetwork(nn.Module):
         elif self.mode == 'no_normal':
             rendering_input = torch.cat([points, view_dirs, feature_vectors], dim=-1)
 
-        x = rendering_input
+        #x = rendering_input
+        x_albedo = torch.cat([points], dim=-1)
+        x_shading = torch.cat([points, feature_vectors], dim=-1)
+        x_specular = torch.cat([points, view_dirs, normals, feature_vectors], dim=-1)
 
-        for l in range(0, self.num_layers - 1):
-            lin = getattr(self, "lin" + str(l))
+        x = x_albedo
+        for l in range(0, self.num_layers_albedo - 1):
+            lin = getattr(self, "lin_albedo" + str(l))
 
             x = lin(x)
 
-            if l < self.num_layers - 2:
+            if l < self.num_layers_albedo - 2:
                 x = self.relu(x)
 
-        x = self.tanh(x)
-        return x
+        y_albedo = self.tanh(x)
+
+        x = x_shading
+        for l in range(0, self.num_layers_shading - 1):
+            lin = getattr(self, "lin_shading" + str(l))
+
+            x = lin(x)
+
+            if l < self.num_layers_shading - 2:
+                x = self.relu(x)
+
+        y_shading = self.tanh(x)
+        y_shading = torch.cat((y_shading, y_shading, y_shading), 1)
+
+        x = x_specular
+        for l in range(0, self.num_layers_specular - 1):
+            lin = getattr(self, "lin_specular" + str(l))
+
+            x = lin(x)
+
+            if l < self.num_layers_specular - 2:
+                x = self.relu(x)
+
+        y_specular = self.tanh(x)
+
+        y = (y_albedo * y_shading) + y_specular
+
+        return y, y_albedo, y_shading, y_specular
 
 class IDRNetwork(nn.Module):
     def __init__(self, conf):
@@ -232,12 +308,22 @@ class IDRNetwork(nn.Module):
         view = -ray_dirs[surface_mask]
 
         rgb_values = torch.ones_like(points).float().cuda()
+        rgb_albedo = torch.ones_like(points).float().cuda()
+        rgb_shading = torch.ones_like(points).float().cuda()
+        rgb_specular = torch.ones_like(points).float().cuda()
         if differentiable_surface_points.shape[0] > 0:
-            rgb_values[surface_mask] = self.get_rbg_value(differentiable_surface_points, view)
+            render_output = self.get_rbg_value(differentiable_surface_points, view)
+            rgb_values[surface_mask] = render_output[0]
+            rgb_albedo[surface_mask] = render_output[1]
+            rgb_shading[surface_mask] = render_output[2]
+            rgb_specular[surface_mask] = render_output[3]
 
         output = {
             'points': points,
             'rgb_values': rgb_values,
+            'rgb_albedo': rgb_albedo,
+            'rgb_shading': rgb_shading,
+            'rgb_specular': rgb_specular,
             'sdf_output': sdf_output,
             'network_object_mask': network_object_mask,
             'object_mask': object_mask,
@@ -252,6 +338,6 @@ class IDRNetwork(nn.Module):
         normals = g[:, 0, :]
 
         feature_vectors = output[:, 1:]
-        rgb_vals = self.rendering_network(points, normals, view_dirs, feature_vectors)
+        rgb_vals, rgb_albedo, rgb_shading, rgb_specular = self.rendering_network(points, normals, view_dirs, feature_vectors)
 
-        return rgb_vals
+        return rgb_vals, rgb_albedo, rgb_shading, rgb_specular
