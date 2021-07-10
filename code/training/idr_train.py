@@ -3,6 +3,7 @@ from datetime import datetime
 from pyhocon import ConfigFactory
 import sys
 import torch
+from torch.autograd import Variable
 
 import utils.general as utils
 import utils.plots as plt
@@ -18,6 +19,7 @@ class IDRTrainRunner():
         self.exps_folder_name = kwargs['exps_folder_name']
         self.GPU_INDEX = kwargs['gpu_index']
         self.train_cameras = kwargs['train_cameras']
+        self.use_discrim = kwargs['use_discrim']
 
         self.expname = self.conf.get_string('train.expname') + kwargs['expname']
         scan_id = kwargs['scan_id'] if kwargs['scan_id'] != -1 else self.conf.get_int('dataset.scan_id', default=-1)
@@ -67,6 +69,13 @@ class IDRTrainRunner():
             utils.mkdir_ifnotexists(os.path.join(self.checkpoints_path, self.optimizer_cam_params_subdir))
             utils.mkdir_ifnotexists(os.path.join(self.checkpoints_path, self.cam_params_subdir))
 
+        if self.use_discrim:
+            self.model_discrim_params_subdir = "ModelDiscrimParameters"
+            self.optimizer_discrim_params_subdir = "OptimizerDiscrimParameters"
+
+            utils.mkdir_ifnotexists(os.path.join(self.checkpoints_path, self.optimizer_discrim_params_subdir))
+            utils.mkdir_ifnotexists(os.path.join(self.checkpoints_path, self.model_discrim_params_subdir))
+
         os.system("""cp -r {0} "{1}" """.format(kwargs['conf'], os.path.join(self.expdir, self.timestamp, 'runconf.conf')))
 
         if (not self.GPU_INDEX == 'ignore'):
@@ -100,6 +109,8 @@ class IDRTrainRunner():
         if torch.cuda.is_available():
             self.model.cuda()
 
+
+
         self.loss = utils.get_class(self.conf.get_string('train.loss_class'))(**self.conf.get_config('loss'))
 
         self.lr = self.conf.get_float('train.learning_rate')
@@ -108,6 +119,7 @@ class IDRTrainRunner():
         self.sched_factor = self.conf.get_float('train.sched_factor', default=0.0)
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, self.sched_milestones, gamma=self.sched_factor)
 
+
         # settings for camera optimization
         if self.train_cameras:
             num_images = len(self.train_dataset)
@@ -115,6 +127,13 @@ class IDRTrainRunner():
             self.pose_vecs.weight.data.copy_(self.train_dataset.get_pose_init())
 
             self.optimizer_cam = torch.optim.SparseAdam(self.pose_vecs.parameters(), self.conf.get_float('train.learning_rate_cam'))
+
+        if self.use_discrim:
+            self.model_discrim = utils.get_class('model.implicit_differentiable_renderer.Discriminator')(**self.conf.get_config('discriminator'))
+            if torch.cuda.is_available():
+                self.model_discrim.cuda()
+
+            self.optimizer_discrim = torch.optim.Adam(self.model_discrim.parameters(), lr=self.lr)
 
         self.start_epoch = 0
         if is_continue:
@@ -135,12 +154,23 @@ class IDRTrainRunner():
 
             if self.train_cameras:
                 data = torch.load(
-                    os.path.join(old_checkpnts_dir, self.optimizer_cam_params_subdir, str(kwargs['checkpoint']) + ".pth"))
+                    os.path.join(old_checkpnts_dir, self.optimizer_cam_params_subdir,
+                                 str(kwargs['checkpoint']) + ".pth"))
                 self.optimizer_cam.load_state_dict(data["optimizer_cam_state_dict"])
 
                 data = torch.load(
                     os.path.join(old_checkpnts_dir, self.cam_params_subdir, str(kwargs['checkpoint']) + ".pth"))
                 self.pose_vecs.load_state_dict(data["pose_vecs_state_dict"])
+
+            if self.use_discrim:
+                data = torch.load(
+                    os.path.join(old_checkpnts_dir, self.optimizer_discrim_params_subdir, str(kwargs['checkpoint']) + ".pth"))
+                self.optimizer_discrim.load_state_dict(data["optimizer_discrim_state_dict"])
+
+                saved_model_discrim_state = torch.load(
+                    os.path.join(old_checkpnts_dir, 'ModelDiscrimParameters', str(kwargs['checkpoint']) + ".pth"))
+                self.model.load_state_dict(saved_model_state["model_discrim_state_dict"])
+                self.start_epoch = saved_model_state['epoch']
 
         self.num_pixels = self.conf.get_int('train.num_pixels')
         self.total_pixels = self.train_dataset.total_pixels
@@ -192,6 +222,21 @@ class IDRTrainRunner():
                 {"epoch": epoch, "pose_vecs_state_dict": self.pose_vecs.state_dict()},
                 os.path.join(self.checkpoints_path, self.cam_params_subdir, "latest.pth"))
 
+        if self.use_discrim:
+            torch.save(
+                {"epoch": epoch, "optimizer_discrim_state_dict": self.optimizer_discrim.state_dict()},
+                os.path.join(self.checkpoints_path, self.optimizer_discrim_params_subdir, str(epoch) + ".pth"))
+            torch.save(
+                {"epoch": epoch, "optimizer_discrim_state_dict": self.optimizer_discrim.state_dict()},
+                os.path.join(self.checkpoints_path, self.optimizer_discrim_params_subdir, "latest.pth"))
+
+            torch.save(
+                {"epoch": epoch, "model_discrim_state_dict": self.model_discrim.state_dict()},
+                os.path.join(self.checkpoints_path, self.model_discrim_params_subdir, str(epoch) + ".pth"))
+            torch.save(
+                {"epoch": epoch, "model_discrim_state_dict": self.model_discrim.state_dict()},
+                os.path.join(self.checkpoints_path, self.model_discrim_params_subdir, "latest.pth"))
+
     def run(self):
         print("training...")
 
@@ -207,6 +252,8 @@ class IDRTrainRunner():
                 self.model.eval()
                 if self.train_cameras:
                     self.pose_vecs.eval()
+                if self.use_discrim:
+                    self.model_discrim.eval()
                 self.train_dataset.change_sampling_idx(-1)
                 indices, model_input, ground_truth = next(iter(self.plot_dataloader))
 
@@ -230,6 +277,7 @@ class IDRTrainRunner():
                         'rgb_albedo': out['rgb_albedo'].detach(),
                         'rgb_shading': out['rgb_shading'].detach(),
                         'rgb_specular': out['rgb_specular'].detach(),
+                        'feature_vectors': out['feature_vectors'].detach(),
                         'network_object_mask': out['network_object_mask'].detach(),
                         'object_mask': out['object_mask'].detach()
                     })
@@ -251,6 +299,8 @@ class IDRTrainRunner():
                 self.model.train()
                 if self.train_cameras:
                     self.pose_vecs.train()
+                if self.use_discrim:
+                    self.model_discrim.train()
 
             self.train_dataset.change_sampling_idx(self.num_pixels)
 
@@ -267,7 +317,10 @@ class IDRTrainRunner():
                     model_input['pose'] = model_input['pose'].cuda()
 
                 model_outputs = self.model(model_input)
-                loss_output = self.loss(model_outputs, ground_truth)
+                if self.use_discrim:
+                    model_discrim_outputs = self.model_discrim(model_outputs['feature_vectors'])
+                    model_outputs['discrim_output'] = model_discrim_outputs
+                loss_output = self.loss(model_outputs, ground_truth, use_discrim=self.use_discrim)
 
                 loss = loss_output['loss']
 
@@ -275,18 +328,28 @@ class IDRTrainRunner():
                 if self.train_cameras:
                     self.optimizer_cam.zero_grad()
 
-                loss.backward()
+                loss.backward(retain_graph=True)
 
                 self.optimizer.step()
                 if self.train_cameras:
                     self.optimizer_cam.step()
 
+                if self.use_discrim:
+                    self.optimizer_discrim.zero_grad()
+
+                    discrim_loss = loss_output['discrim_loss']
+                    discrim_loss.backward(retain_graph=False)
+
+                    self.optimizer_discrim.step()
+
                 print(
-                    '{0} [{1}] ({2}/{3}): loss = {4}, rgb_loss = {5}, eikonal_loss = {6}, specular_loss = {7}, mask_loss = {8}, alpha = {9}, lr = {10}'
+                    '{0} [{1}] ({2}/{3}): loss = {4}, rgb_loss = {5}, eikonal_loss = {6}, specular_loss = {7}, discrim_loss={8}, gen_discrim_loss={9}, mask_loss = {10}, alpha = {11}, lr = {12}'
                         .format(self.expname, epoch, data_index, self.n_batches, loss.item(),
                                 loss_output['rgb_loss'].item(),
                                 loss_output['eikonal_loss'].item(),
                                 loss_output['specular_loss'].item(),
+                                loss_output['discrim_loss'].item() if self.use_discrim else 0,
+                                loss_output['gen_discrim_loss'].item() if self.use_discrim else 0,
                                 loss_output['mask_loss'].item(),
                                 self.loss.alpha,
                                 self.scheduler.get_lr()[0]))

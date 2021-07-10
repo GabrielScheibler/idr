@@ -64,9 +64,9 @@ def plot(model, indices, model_outputs ,pose, rgb_gt, path, epoch, img_res, plot
         data.append(get_3D_scatter_trace(p, name='intersection_points_{0}'.format(i), caption=caption))
 
     fig = go.Figure(data=data)
-    scene_dict = dict(xaxis=dict(range=[-3, 3], autorange=False),
-                      yaxis=dict(range=[-3, 3], autorange=False),
-                      zaxis=dict(range=[-3, 3], autorange=False),
+    scene_dict = dict(xaxis=dict(range=[-4, 4], autorange=False),
+                      yaxis=dict(range=[-4, 4], autorange=False),
+                      zaxis=dict(range=[-4, 4], autorange=False),
                       aspectratio=dict(x=1, y=1, z=1))
     fig.update_layout(scene=scene_dict, width=1400, height=1400, showlegend=True)
     filename = '{0}/surface_{1}.html'.format(path, epoch)
