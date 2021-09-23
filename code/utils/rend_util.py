@@ -152,14 +152,18 @@ def get_sphere_intersection(cam_loc, ray_directions, r = 1.0):
     mask_intersect = under_sqrt > 0
 
     sphere_intersections = torch.zeros(n_imgs * n_pix, 2).cuda().float()
-    sphere_intersections[mask_intersect] = torch.sqrt(under_sqrt[mask_intersect]).unsqueeze(-1) * torch.Tensor([-1, 1]).cuda().float()
-    sphere_intersections[mask_intersect] -= ray_cam_dot.reshape(-1)[mask_intersect].unsqueeze(-1)
+
+    sphere_intersections[mask_intersect] = torch.sqrt(under_sqrt[mask_intersect]).unsqueeze(-1) * torch.Tensor(
+        [-1, 1]).cuda().float() - ray_cam_dot.reshape(-1)[mask_intersect].unsqueeze(-1)
+
+    #sphere_intersections.masked_scatter(mask_intersect, torch.sqrt(under_sqrt[mask_intersect]).unsqueeze(-1) * torch.Tensor([-1, 1]).cuda().float())
+    #sphere_intersections.masked_scatter(mask_intersect, sphere_intersections[mask_intersect] - ray_cam_dot.reshape(-1)[mask_intersect].unsqueeze(-1))
 
     sphere_intersections = sphere_intersections.reshape(n_imgs, n_pix, 2)
     sphere_intersections = sphere_intersections.clamp_min(0.0)
     mask_intersect = mask_intersect.reshape(n_imgs, n_pix)
 
-    return sphere_intersections, mask_intersect
+    return sphere_intersections.clone(), mask_intersect
 
 def get_depth(points, pose):
     ''' Retruns depth from 3D points according to camera pose '''

@@ -30,9 +30,12 @@ class RayTracing(nn.Module):
                 ray_directions
                 ):
 
+        #ray_directions = ray_directions.detach()
+        #cam_loc = cam_loc.detach()
+
         batch_size, num_pixels, _ = ray_directions.shape
 
-        sphere_intersections, mask_intersect = rend_util.get_sphere_intersection(cam_loc, ray_directions, r=self.object_bounding_sphere)
+        sphere_intersections, mask_intersect = rend_util.get_sphere_intersection(cam_loc.detach(), ray_directions.detach(), r=self.object_bounding_sphere)
 
         curr_start_points, unfinished_mask_start, acc_start_dis, acc_end_dis, min_dis, max_dis = \
             self.sphere_tracing(batch_size, num_pixels, sdf, cam_loc, ray_directions, mask_intersect, sphere_intersections)
@@ -48,14 +51,15 @@ class RayTracing(nn.Module):
             sampler_min_max.reshape(-1, 2)[sampler_mask, 1] = acc_end_dis[sampler_mask]
 
             sampler_pts, sampler_net_obj_mask, sampler_dists = self.ray_sampler(sdf,
-                                                                                cam_loc,
+                                                                                cam_loc.detach(),
                                                                                 object_mask,
-                                                                                ray_directions,
+                                                                                ray_directions.detach(),
                                                                                 sampler_min_max,
                                                                                 sampler_mask
                                                                                 )
 
             curr_start_points[sampler_mask] = sampler_pts[sampler_mask]
+            acc_start_dis = acc_start_dis.clone()
             acc_start_dis[sampler_mask] = sampler_dists[sampler_mask]
             network_object_mask[sampler_mask] = sampler_net_obj_mask[sampler_mask]
 
@@ -69,7 +73,7 @@ class RayTracing(nn.Module):
                    network_object_mask, \
                    acc_start_dis
 
-        ray_directions = ray_directions.reshape(-1, 3)
+        ray_directions = ray_directions.detach().reshape(-1, 3)
         mask_intersect = mask_intersect.reshape(-1)
 
         in_mask = ~network_object_mask & object_mask & ~sampler_mask
@@ -77,7 +81,7 @@ class RayTracing(nn.Module):
 
         mask_left_out = (in_mask | out_mask) & ~mask_intersect
         if mask_left_out.sum() > 0:  # project the origin to the not intersect points on the sphere
-            cam_left_out = cam_loc.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)[mask_left_out]
+            cam_left_out = cam_loc.detach().unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)[mask_left_out]
             rays_left_out = ray_directions[mask_left_out]
             acc_start_dis[mask_left_out] = -torch.bmm(rays_left_out.view(-1, 1, 3), cam_left_out.view(-1, 3, 1)).squeeze()
             curr_start_points[mask_left_out] = cam_left_out + acc_start_dis[mask_left_out].unsqueeze(1) * rays_left_out
@@ -85,9 +89,9 @@ class RayTracing(nn.Module):
         mask = (in_mask | out_mask) & mask_intersect
 
         if mask.sum() > 0:
-            min_dis[network_object_mask & out_mask] = acc_start_dis[network_object_mask & out_mask]
+            min_dis = min_dis.masked_scatter(network_object_mask & out_mask, acc_start_dis[network_object_mask & out_mask])
 
-            min_mask_points, min_mask_dist = self.minimal_sdf_points(num_pixels, sdf, cam_loc, ray_directions, mask, min_dis, max_dis)
+            min_mask_points, min_mask_dist = self.minimal_sdf_points(num_pixels, sdf, cam_loc.detach(), ray_directions, mask, min_dis, max_dis)
 
             curr_start_points[mask] = min_mask_points
             acc_start_dis[mask] = min_mask_dist
@@ -100,9 +104,14 @@ class RayTracing(nn.Module):
     def sphere_tracing(self, batch_size, num_pixels, sdf, cam_loc, ray_directions, mask_intersect, sphere_intersections):
         ''' Run sphere tracing algorithm for max iterations from both sides of unit sphere intersection '''
 
-        sphere_intersections_points = cam_loc.reshape(batch_size, 1, 1, 3) + sphere_intersections.unsqueeze(-1) * ray_directions.unsqueeze(2)
-        unfinished_mask_start = mask_intersect.reshape(-1).clone()
-        unfinished_mask_end = mask_intersect.reshape(-1).clone()
+        #ray_directions = ray_directions.detach()
+        #cam_loc = cam_loc.detach()
+        #sphere_intersections = sphere_intersections.detach()
+        #mask_intersect = mask_intersect.detach()
+
+        sphere_intersections_points = cam_loc.detach().reshape(batch_size, 1, 1, 3) + sphere_intersections.detach().unsqueeze(-1) * ray_directions.detach().unsqueeze(2)
+        unfinished_mask_start = mask_intersect.detach().reshape(-1).clone()
+        unfinished_mask_end = mask_intersect.detach().reshape(-1).clone()
 
         # Initialize start current points
         curr_start_points = torch.zeros(batch_size * num_pixels, 3).cuda().float()
@@ -129,6 +138,9 @@ class RayTracing(nn.Module):
         next_sdf_end = torch.zeros_like(acc_end_dis).cuda()
         next_sdf_end[unfinished_mask_end] = sdf(curr_end_points[unfinished_mask_end])
 
+        cnt = 0
+        #ray_directions_old = ray_directions
+
         while True:
             # Update sdf
             curr_sdf_start = torch.zeros_like(acc_start_dis).cuda()
@@ -152,31 +164,38 @@ class RayTracing(nn.Module):
             acc_start_dis = acc_start_dis + curr_sdf_start
             acc_end_dis = acc_end_dis - curr_sdf_end
 
+            if cnt == 1:
+                ray_directions = ray_directions.detach()
+                cam_loc = cam_loc.detach()
+                sphere_intersections = sphere_intersections.detach()
+                mask_intersect = mask_intersect.detach()
+            cnt += 1
+
             # Update points
             curr_start_points = (cam_loc.unsqueeze(1) + acc_start_dis.reshape(batch_size, num_pixels, 1) * ray_directions).reshape(-1, 3)
             curr_end_points = (cam_loc.unsqueeze(1) + acc_end_dis.reshape(batch_size, num_pixels, 1) * ray_directions).reshape(-1, 3)
 
             # Fix points which wrongly crossed the surface
             next_sdf_start = torch.zeros_like(acc_start_dis).cuda()
-            next_sdf_start[unfinished_mask_start] = sdf(curr_start_points[unfinished_mask_start])
+            next_sdf_start = next_sdf_start.masked_scatter(unfinished_mask_start, sdf(curr_start_points[unfinished_mask_start]))
 
             next_sdf_end = torch.zeros_like(acc_end_dis).cuda()
-            next_sdf_end[unfinished_mask_end] = sdf(curr_end_points[unfinished_mask_end])
+            next_sdf_end = next_sdf_end.masked_scatter(unfinished_mask_end, sdf(curr_end_points[unfinished_mask_end]))
 
             not_projected_start = next_sdf_start < 0
             not_projected_end = next_sdf_end < 0
             not_proj_iters = 0
             while (not_projected_start.sum() > 0 or not_projected_end.sum() > 0) and not_proj_iters < self.line_step_iters:
                 # Step backwards
-                acc_start_dis[not_projected_start] -= ((1 - self.line_search_step) / (2 ** not_proj_iters)) * curr_sdf_start[not_projected_start]
-                curr_start_points[not_projected_start] = (cam_loc.unsqueeze(1) + acc_start_dis.reshape(batch_size, num_pixels, 1) * ray_directions).reshape(-1, 3)[not_projected_start]
+                acc_start_dis = acc_start_dis.masked_scatter(not_projected_start, acc_start_dis[not_projected_start] - ((1 - self.line_search_step) / (2 ** not_proj_iters)) * curr_sdf_start[not_projected_start])
+                curr_start_points = curr_start_points.masked_scatter(torch.stack((not_projected_start,not_projected_start,not_projected_start),1), (cam_loc.unsqueeze(1) + acc_start_dis.reshape(batch_size, num_pixels, 1) * ray_directions).reshape(-1, 3)[not_projected_start])
 
-                acc_end_dis[not_projected_end] += ((1 - self.line_search_step) / (2 ** not_proj_iters)) * curr_sdf_end[not_projected_end]
-                curr_end_points[not_projected_end] = (cam_loc.unsqueeze(1) + acc_end_dis.reshape(batch_size, num_pixels, 1) * ray_directions).reshape(-1, 3)[not_projected_end]
+                acc_end_dis = acc_end_dis.masked_scatter(not_projected_end, acc_end_dis[not_projected_end] + (((1 - self.line_search_step) / (2 ** not_proj_iters)) * curr_sdf_end[not_projected_end]))
+                curr_end_points = curr_end_points.masked_scatter(torch.stack((not_projected_end,not_projected_end,not_projected_end),1), (cam_loc.unsqueeze(1) + acc_end_dis.reshape(batch_size, num_pixels, 1) * ray_directions).reshape(-1, 3)[not_projected_end])
 
                 # Calc sdf
-                next_sdf_start[not_projected_start] = sdf(curr_start_points[not_projected_start])
-                next_sdf_end[not_projected_end] = sdf(curr_end_points[not_projected_end])
+                next_sdf_start = next_sdf_start.masked_scatter(not_projected_start, sdf(curr_start_points[not_projected_start]))
+                next_sdf_end = next_sdf_end.masked_scatter(not_projected_end, sdf(curr_end_points[not_projected_end]))
 
                 # Update mask
                 not_projected_start = next_sdf_start < 0

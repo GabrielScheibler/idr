@@ -6,6 +6,8 @@ from utils import rend_util
 from model.embedder import *
 from model.ray_tracing import RayTracing
 from model.sample_network import SampleNetwork
+from torch.nn import functional as F
+from torch.utils.checkpoint import checkpoint
 
 class ImplicitNetwork(nn.Module):
     def __init__(
@@ -109,7 +111,8 @@ class RenderingNetwork(nn.Module):
             dims_specular,
             weight_norm=True,
             multires_view=0,
-            multires=0
+            multires=0,
+            lightsources=1
     ):
         super().__init__()
 
@@ -145,6 +148,15 @@ class RenderingNetwork(nn.Module):
         self.num_layers_shading = len(dims_shading)
         self.num_layers_specular = len(dims_specular)
 
+        self.lights = torch.nn.Parameter(data=torch.Tensor(lightsources, 4), requires_grad=True)
+        #self.lights.data.uniform_(-5, 5)
+        # 0 , -4 , 3 , ?
+        self.lights.data = torch.Tensor([[0,-4,3,0.1]])
+        #self.lights.data.fill_(1)
+        self.ambient_light = torch.nn.Parameter(data=torch.Tensor(lightsources, 1), requires_grad=True)
+        self.ambient_light.data.uniform_(0, 0.4)
+
+
         for l in range(0, self.num_layers_albedo - 1):
             out_dim = dims_albedo[l + 1]
             lin = nn.Linear(dims_albedo[l], out_dim)
@@ -154,14 +166,14 @@ class RenderingNetwork(nn.Module):
 
             setattr(self, "lin_albedo" + str(l), lin)
 
-        for l in range(0, self.num_layers_shading - 1):
+        """for l in range(0, self.num_layers_shading - 1):
             out_dim = dims_shading[l + 1]
             lin = nn.Linear(dims_shading[l], out_dim)
 
             if weight_norm:
                 lin = nn.utils.weight_norm(lin)
 
-            setattr(self, "lin_shading" + str(l), lin)
+            setattr(self, "lin_shading" + str(l), lin)"""
 
         for l in range(0, self.num_layers_specular - 1):
             out_dim = dims_specular[l + 1]
@@ -175,9 +187,12 @@ class RenderingNetwork(nn.Module):
         self.relu = nn.ReLU()
         self.tanh = nn.Tanh()
 
-    def forward(self, points, normals, view_dirs, feature_vectors):
+    def forward(self, points, normals, view_dirs, feature_vectors, implicit_network, ray_tracer, sample_network):
         if self.embedview_fn is not None:
             view_dirs = self.embedview_fn(view_dirs)
+
+        pointpos = points
+        pointpos = torch.unsqueeze(pointpos, 0)
 
         if self.embed_fn is not None:
             points = self.embed_fn(points)
@@ -205,7 +220,7 @@ class RenderingNetwork(nn.Module):
 
         y_albedo = self.tanh(x)
 
-        x = x_shading
+        """x = x_shading
         for l in range(0, self.num_layers_shading - 1):
             lin = getattr(self, "lin_shading" + str(l))
 
@@ -215,7 +230,77 @@ class RenderingNetwork(nn.Module):
                 x = self.relu(x)
 
         y_shading = self.tanh(x)
+        y_shading = torch.cat((y_shading, y_shading, y_shading), 1)"""
+
+        lightpositions = self.lights[:,0:3]
+        lightstrengths = self.lights[:,3]
+        total_luminance = torch.zeros_like(lightstrengths)
+        batch_size = 1
+        num_pixels = pointpos.shape[1]
+
+        for l in range(0,self.lights.shape[0]):
+            lightpos = lightpositions[l, :]
+            lightpos = torch.unsqueeze(torch.unsqueeze(lightpos, 0),0)
+            ray_dirs = F.normalize(pointpos - lightpos, dim=2)
+            lightpos = torch.squeeze(lightpos, 1)
+
+
+
+            #implicit_network.eval()
+            #with torch.no_grad():
+            points, network_object_mask, dists = ray_tracer(sdf=lambda x: checkpoint(implicit_network, x)[:, 0],
+                                                                     cam_loc=lightpos,
+                                                                     object_mask=torch.ones_like(points[:,0]).bool(),
+                                                                     ray_directions=ray_dirs)
+            implicit_network.train()
+
+            points = (lightpos.detach().unsqueeze(1) + dists.detach().reshape(batch_size, num_pixels, 1) * ray_dirs.detach()).reshape(-1, 3)
+
+            sdf_output = implicit_network(points)[:, 0:1]
+            #ray_dirs = ray_dirs.reshape(-1, 3)
+
+            if self.training:
+                surface_mask = torch.ones_like(points[:,0]).bool()
+                surface_points = points[surface_mask]
+                surface_dists = dists[surface_mask].unsqueeze(-1)
+                surface_ray_dirs = ray_dirs.reshape(-1, 3)[surface_mask]
+                surface_lightpos = lightpos.unsqueeze(1).repeat(1, num_pixels, 1).reshape(-1, 3)[surface_mask]
+                surface_output = sdf_output[surface_mask]
+                N = surface_points.shape[0]
+
+                points_all = torch.cat([surface_points], dim=0)
+
+                output = implicit_network(surface_points)
+                surface_sdf_values = output[:N, 0:1].detach()
+
+                g = implicit_network.gradient(points_all)
+                surface_points_grad = g[:N, 0, :].clone().detach()
+
+                differentiable_surface_points = sample_network(surface_output,
+                                                                    surface_sdf_values,
+                                                                    surface_points_grad,
+                                                                    surface_dists,
+                                                                    surface_lightpos,
+                                                                    surface_ray_dirs)
+                #differentiable_surface_points = surface_points
+
+            else:
+                surface_mask = network_object_mask
+                differentiable_surface_points = points
+                grad_theta = None
+
+            light_dist_diff = torch.norm(torch.squeeze(pointpos,0) - differentiable_surface_points, dim=1)
+            #light_dist_diff = torch.abs(light_dists_1 - light_dists_2)
+            luminance = 1 - 2 * self.tanh(light_dist_diff * 10)
+            luminance = luminance * lightstrengths[l]
+            total_luminance = total_luminance + luminance
+
+        total_luminance = total_luminance + torch.squeeze(self.ambient_light)
+        y_shading = torch.min(torch.max(total_luminance,torch.ones_like(total_luminance)*-1),torch.ones_like(total_luminance))
+        #y_shading = self.tanh(total_luminance)
+        y_shading = torch.unsqueeze(y_shading,1)
         y_shading = torch.cat((y_shading, y_shading, y_shading), 1)
+
 
         x = x_specular
         for l in range(0, self.num_layers_specular - 1):
@@ -228,7 +313,10 @@ class RenderingNetwork(nn.Module):
 
         y_specular = self.tanh(x)
 
-        y = (y_albedo * y_shading) + y_specular
+        y = ((((y_albedo + 1) / 2) * ((y_shading + 1) / 2)) + ((y_specular + 1) / 2)) * 2 - 1
+
+        print("lights: ", self.lights)
+        print("lights_grad: ", self.lights.grad)
 
         return y, y_albedo, y_shading, y_specular
 
@@ -254,15 +342,20 @@ class IDRNetwork(nn.Module):
 
         batch_size, num_pixels, _ = ray_dirs.shape
 
+        print(ray_dirs.shape)
+        print(cam_loc.shape)
+
         self.implicit_network.eval()
         with torch.no_grad():
-            points, network_object_mask, dists = self.ray_tracer(sdf=lambda x: self.implicit_network(x)[:, 0],
+            points, network_object_mask, dists = self.ray_tracer(sdf=lambda x: checkpoint(self.implicit_network, x)[:, 0],
                                                                  cam_loc=cam_loc,
                                                                  object_mask=object_mask,
                                                                  ray_directions=ray_dirs)
         self.implicit_network.train()
 
         points = (cam_loc.unsqueeze(1) + dists.reshape(batch_size, num_pixels, 1) * ray_dirs).reshape(-1, 3)
+
+        print("points: " , points.shape)
 
         sdf_output = self.implicit_network(points)[:, 0:1]
         ray_dirs = ray_dirs.reshape(-1, 3)
@@ -299,6 +392,7 @@ class IDRNetwork(nn.Module):
                                                                 surface_dists,
                                                                 surface_cam_loc,
                                                                 surface_ray_dirs)
+            #differentiable_surface_points = surface_points
 
         else:
             surface_mask = network_object_mask
@@ -338,6 +432,6 @@ class IDRNetwork(nn.Module):
         normals = g[:, 0, :]
 
         feature_vectors = output[:, 1:]
-        rgb_vals, rgb_albedo, rgb_shading, rgb_specular = self.rendering_network(points, normals, view_dirs, feature_vectors)
+        rgb_vals, rgb_albedo, rgb_shading, rgb_specular = self.rendering_network(points, normals, view_dirs, feature_vectors, self.implicit_network, self.ray_tracer, self.sample_network)
 
         return rgb_vals, rgb_albedo, rgb_shading, rgb_specular

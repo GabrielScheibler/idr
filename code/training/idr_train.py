@@ -12,6 +12,7 @@ class IDRTrainRunner():
         torch.set_default_dtype(torch.float32)
         torch.set_num_threads(1)
 
+        torch.autograd.set_detect_anomaly(True)
         self.conf = ConfigFactory.parse_file(kwargs['conf'])
         self.batch_size = kwargs['batch_size']
         self.nepochs = kwargs['nepochs']
@@ -85,6 +86,7 @@ class IDRTrainRunner():
 
         print('Finish loading data ...')
 
+
         self.train_dataloader = torch.utils.data.DataLoader(self.train_dataset,
                                                             batch_size=self.batch_size,
                                                             shuffle=True,
@@ -146,6 +148,7 @@ class IDRTrainRunner():
         self.total_pixels = self.train_dataset.total_pixels
         self.img_res = self.train_dataset.img_res
         self.n_batches = len(self.train_dataloader)
+        print(self.n_batches)
         self.plot_freq = self.conf.get_int('train.plot_freq')
         self.plot_conf = self.conf.get_config('plot')
 
