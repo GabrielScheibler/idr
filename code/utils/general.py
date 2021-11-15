@@ -1,6 +1,7 @@
 import os
 from glob import glob
 import torch
+import numpy as np
 
 def mkdir_ifnotexists(directory):
     if not os.path.exists(directory):
@@ -53,3 +54,41 @@ def merge_output(res, total_pixels, batch_size):
                                              1).reshape(batch_size * total_pixels, -1)
 
     return model_outputs
+
+def cartesian_to_spherical(lightpos, pointpos):
+
+
+    #pointpos = torch.tile(pointpos,(1,3,1))
+    #pointpos = pointpos.repeat(1, lightpos.shape[0], 1)
+    #lightpos = torch.repeat_interleave(lightpos,pointpos.shape[1],0)
+    #lightpos = lightpos.unsqueeze(0)
+
+    #ptsnew = torch.zeros([lightpos.shape[0], lightpos.shape[1], 4])
+
+    lightpos = torch.clamp(lightpos, min=0.001)
+    pointpos = torch.clamp(pointpos, min=0.001)
+
+    xy = lightpos[:,:,0] ** 2 + lightpos[:,:,1] ** 2
+    ptsnew0 = torch.atan2(torch.sqrt(xy), lightpos[:,:,2])  # for elevation angle defined from Z-axis down
+    ptsnew1 = torch.atan2(lightpos[:,:,1], lightpos[:,:,0])
+
+    pointpos = pointpos - lightpos
+    pointpos = torch.clamp(pointpos, min=0.001)
+    
+    xy = pointpos[:,:,0]**2 + pointpos[:,:,1]**2
+    ptsnew2 = torch.atan2(torch.sqrt(xy), pointpos[:,:,2]) # for elevation angle defined from Z-axis down
+    ptsnew3 = torch.atan2(pointpos[:,:,1], pointpos[:,:,0])
+
+    ptsnew = torch.stack([ptsnew0,ptsnew1,ptsnew2,ptsnew3],2).cuda()
+    ptsnew = torch.squeeze(ptsnew,0)
+
+    return ptsnew
+
+def appendSpherical_np(xyz):
+    ptsnew = np.zeros([lightpos.shape[0],lightpos.shape[1],4])
+    xy = xyz[:,0]**2 + xyz[:,1]**2
+    ptsnew[:,3] = np.sqrt(xy + xyz[:,2]**2)
+    ptsnew[:,4] = np.arctan2(np.sqrt(xy), xyz[:,2]) # for elevation angle defined from Z-axis down
+    #ptsnew[:,4] = np.arctan2(xyz[:,2], np.sqrt(xy)) # for elevation angle defined from XY-plane up
+    ptsnew[:,5] = np.arctan2(xyz[:,1], xyz[:,0])
+    return ptsnew

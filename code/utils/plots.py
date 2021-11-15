@@ -12,6 +12,8 @@ def plot(model, indices, model_outputs ,pose, rgb_gt, path, epoch, img_res, plot
     # arrange data to plot
     batch_size, num_samples, _ = rgb_gt.shape
 
+    print('rgb_shading_fake' in model_outputs)
+
     network_object_mask = model_outputs['network_object_mask']
     points = model_outputs['points'].reshape(batch_size, num_samples, 3)
     rgb_eval = model_outputs['rgb_values']
@@ -22,6 +24,8 @@ def plot(model, indices, model_outputs ,pose, rgb_gt, path, epoch, img_res, plot
     rgb_eval_shading = rgb_eval_shading.reshape(batch_size, num_samples, 3)
     rgb_eval_specular = model_outputs['rgb_specular']
     rgb_eval_specular = rgb_eval_specular.reshape(batch_size, num_samples, 3)
+    rgb_eval_shading_fake = model_outputs['rgb_shading_fake']
+    rgb_eval_shading_fake = rgb_eval_shading_fake.reshape(batch_size, num_samples, 3)
 
     depth = torch.ones(batch_size * num_samples).cuda().float() * max_depth
     depth[network_object_mask] = rend_util.get_depth(points, pose).reshape(-1)[network_object_mask]
@@ -35,6 +39,7 @@ def plot(model, indices, model_outputs ,pose, rgb_gt, path, epoch, img_res, plot
     plot_images_albedo(rgb_eval_albedo, rgb_gt, path, epoch, plot_nimgs, img_res)
     plot_images_shading(rgb_eval_shading, rgb_gt, path, epoch, plot_nimgs, img_res)
     plot_images_specular(rgb_eval_specular, rgb_gt, path, epoch, plot_nimgs, img_res)
+    plot_images_shading_fake(rgb_eval_shading_fake, rgb_eval_shading, path, epoch, plot_nimgs, img_res)
 
     # plot depth maps
     plot_depth_maps(depth, path, epoch, plot_nimgs, img_res)
@@ -370,6 +375,25 @@ def plot_images_specular(rgb_points, ground_true, path, epoch, plot_nrow, img_re
 
     img = Image.fromarray(tensor)
     img.save('{0}/rendering_specular_{1}.png'.format(path, epoch))
+
+def plot_images_shading_fake(rgb_points, ground_true, path, epoch, plot_nrow, img_res):
+    ground_true = (ground_true.cuda() + 1.) / 2.
+    rgb_points = (rgb_points + 1. ) / 2.
+
+    output_vs_gt = torch.cat((rgb_points, ground_true), dim=0)
+    output_vs_gt_plot = lin2img(output_vs_gt, img_res)
+
+    tensor = torchvision.utils.make_grid(output_vs_gt_plot,
+                                         scale_each=False,
+                                         normalize=False,
+                                         nrow=plot_nrow).cpu().detach().numpy()
+
+    tensor = tensor.transpose(1, 2, 0)
+    scale_factor = 255
+    tensor = (tensor * scale_factor).astype(np.uint8)
+
+    img = Image.fromarray(tensor)
+    img.save('{0}/rendering_shading_fake_{1}.png'.format(path, epoch))
 
 def lin2img(tensor, img_res):
     batch_size, num_samples, channels = tensor.shape

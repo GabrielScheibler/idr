@@ -48,3 +48,17 @@ def get_embedder(multires):
     embedder_obj = Embedder(**embed_kwargs)
     def embed(x, eo=embedder_obj): return eo.embed(x)
     return embed, embedder_obj.out_dim
+
+def get_embedder_2(multires):
+    embed_kwargs = {
+        'include_input': True,
+        'input_dims': 4,
+        'max_freq_log2': multires-1,
+        'num_freqs': multires,
+        'log_sampling': True,
+        'periodic_fns': [torch.sin, torch.cos],
+    }
+
+    embedder_obj = Embedder(**embed_kwargs)
+    def embed(x, eo=embedder_obj): return eo.embed(x)
+    return embed, embedder_obj.out_dim

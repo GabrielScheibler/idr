@@ -103,12 +103,19 @@ class IDRTrainRunner():
             self.model.cuda()
 
         self.loss = utils.get_class(self.conf.get_string('train.loss_class'))(**self.conf.get_config('loss'))
+        optim_params = [param for name,param in self.model.named_parameters() if (not "lights" in name) and (not "ambient_light" in name) and (not "directed_implicit_network" in name)]
+        optim_params_dsdf = [param for name,param in self.model.named_parameters() if "directed_implicit_network" in name]
+        optim_params_lights = [param for name,param in self.model.named_parameters() if ("lights" in name) or ("ambient_light" in name)]
 
         self.lr = self.conf.get_float('train.learning_rate')
-        self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.lr)
+        self.optimizer = torch.optim.Adam(optim_params, lr=self.lr)
+        self.optimizer_dsdf = torch.optim.Adam(optim_params_dsdf, lr=self.lr * 1)
+        self.optimizer_lights = torch.optim.Adam(optim_params_lights, lr=self.lr * 1000)
         self.sched_milestones = self.conf.get_list('train.sched_milestones', default=[])
         self.sched_factor = self.conf.get_float('train.sched_factor', default=0.0)
         self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, self.sched_milestones, gamma=self.sched_factor)
+        self.scheduler_dsdf = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_dsdf, self.sched_milestones, gamma=self.sched_factor)
+        self.scheduler_lights = torch.optim.lr_scheduler.MultiStepLR(self.optimizer_lights, self.sched_milestones, gamma=self.sched_factor)
 
         # settings for camera optimization
         if self.train_cameras:
@@ -130,10 +137,26 @@ class IDRTrainRunner():
             data = torch.load(
                 os.path.join(old_checkpnts_dir, 'OptimizerParameters', str(kwargs['checkpoint']) + ".pth"))
             self.optimizer.load_state_dict(data["optimizer_state_dict"])
+            
+            data = torch.load(
+                os.path.join(old_checkpnts_dir, 'OptimizerParameters', str(kwargs['checkpoint']) + ".pth"))
+            self.optimizer_dsdf.load_state_dict(data["optimizer_dsdf_state_dict"])
+
+            data = torch.load(
+                os.path.join(old_checkpnts_dir, 'OptimizerParameters', str(kwargs['checkpoint']) + ".pth"))
+            self.optimizer_lights.load_state_dict(data["optimizer_lights_state_dict"])
 
             data = torch.load(
                 os.path.join(old_checkpnts_dir, self.scheduler_params_subdir, str(kwargs['checkpoint']) + ".pth"))
             self.scheduler.load_state_dict(data["scheduler_state_dict"])
+
+            data = torch.load(
+                os.path.join(old_checkpnts_dir, self.scheduler_params_subdir, str(kwargs['checkpoint']) + ".pth"))
+            self.scheduler_dsdf.load_state_dict(data["scheduler_dsdf_state_dict"])
+
+            data = torch.load(
+                os.path.join(old_checkpnts_dir, self.scheduler_params_subdir, str(kwargs['checkpoint']) + ".pth"))
+            self.scheduler_lights.load_state_dict(data["scheduler_lights_state_dict"])
 
             if self.train_cameras:
                 data = torch.load(
@@ -174,10 +197,38 @@ class IDRTrainRunner():
             os.path.join(self.checkpoints_path, self.optimizer_params_subdir, "latest.pth"))
 
         torch.save(
+            {"epoch": epoch, "optimizer_dsdf_state_dict": self.optimizer_dsdf.state_dict()},
+            os.path.join(self.checkpoints_path, self.optimizer_params_subdir, str(epoch) + ".pth"))
+        torch.save(
+            {"epoch": epoch, "optimizer_dsdf_state_dict": self.optimizer_dsdf.state_dict()},
+            os.path.join(self.checkpoints_path, self.optimizer_params_subdir, "latest.pth"))
+
+        torch.save(
+            {"epoch": epoch, "optimizer_lights_state_dict": self.optimizer_lights.state_dict()},
+            os.path.join(self.checkpoints_path, self.optimizer_params_subdir, str(epoch) + ".pth"))
+        torch.save(
+            {"epoch": epoch, "optimizer_lights_state_dict": self.optimizer_lights.state_dict()},
+            os.path.join(self.checkpoints_path, self.optimizer_params_subdir, "latest.pth"))
+
+        torch.save(
             {"epoch": epoch, "scheduler_state_dict": self.scheduler.state_dict()},
             os.path.join(self.checkpoints_path, self.scheduler_params_subdir, str(epoch) + ".pth"))
         torch.save(
             {"epoch": epoch, "scheduler_state_dict": self.scheduler.state_dict()},
+            os.path.join(self.checkpoints_path, self.scheduler_params_subdir, "latest.pth"))
+
+        torch.save(
+            {"epoch": epoch, "scheduler_dsdf_state_dict": self.scheduler_dsdf.state_dict()},
+            os.path.join(self.checkpoints_path, self.scheduler_params_subdir, str(epoch) + ".pth"))
+        torch.save(
+            {"epoch": epoch, "scheduler_dsdf_state_dict": self.scheduler_dsdf.state_dict()},
+            os.path.join(self.checkpoints_path, self.scheduler_params_subdir, "latest.pth"))
+
+        torch.save(
+            {"epoch": epoch, "scheduler_lights_state_dict": self.scheduler_lights.state_dict()},
+            os.path.join(self.checkpoints_path, self.scheduler_params_subdir, str(epoch) + ".pth"))
+        torch.save(
+            {"epoch": epoch, "scheduler_lights_state_dict": self.scheduler_lights.state_dict()},
             os.path.join(self.checkpoints_path, self.scheduler_params_subdir, "latest.pth"))
 
         if self.train_cameras:
@@ -232,13 +283,18 @@ class IDRTrainRunner():
                         'rgb_values': out['rgb_values'].detach(),
                         'rgb_albedo': out['rgb_albedo'].detach(),
                         'rgb_shading': out['rgb_shading'].detach(),
+                        'rgb_shading_fake': out['rgb_shading_fake'].detach(),
                         'rgb_specular': out['rgb_specular'].detach(),
                         'network_object_mask': out['network_object_mask'].detach(),
                         'object_mask': out['object_mask'].detach()
                     })
 
+                    #print('rgb_shading_fake' in res)
+
                 batch_size = ground_truth['rgb'].shape[0]
                 model_outputs = utils.merge_output(res, self.total_pixels, batch_size)
+
+                #print('rgb_shading_fake' in model_outputs)
 
                 plt.plot(self.model,
                          indices,
@@ -278,20 +334,40 @@ class IDRTrainRunner():
                 if self.train_cameras:
                     self.optimizer_cam.zero_grad()
 
-                loss.backward()
+                loss.backward(retain_graph=True)
+
+                """for name, param in self.model.named_parameters():
+                    if param.requires_grad:
+                        print(name)
+                        print(torch.sum(param.data))
+                        print(torch.sum(param.grad))"""
 
                 self.optimizer.step()
+
                 if self.train_cameras:
                     self.optimizer_cam.step()
 
+                self.optimizer_dsdf.zero_grad()
+                loss_output['dsdf_loss'].backward(retain_graph=True)
+                self.optimizer_dsdf.step()
+
+                self.optimizer_lights.zero_grad()
+                loss_output['shading_loss'].backward()
+                self.optimizer_lights.step()
+
+
                 print(
-                    '{0} [{1}] ({2}/{3}): loss = {4}, rgb_loss = {5}, eikonal_loss = {6}, specular_loss = {7}, mask_loss = {8}, alpha = {9}, lr = {10}'
+                    '{0} [{1}] ({2}/{3}): loss = {4}, rgb_loss = {5}, eikonal_loss = {6}, specular_loss = {7}, dsdf_loss = {8}, shading_loss = {9}, mask_loss = {10}, alpha = {11}, lr = {12}'
                         .format(self.expname, epoch, data_index, self.n_batches, loss.item(),
                                 loss_output['rgb_loss'].item(),
                                 loss_output['eikonal_loss'].item(),
                                 loss_output['specular_loss'].item(),
+                                loss_output['dsdf_loss'].item(),
+                                loss_output['shading_loss'].item(),
                                 loss_output['mask_loss'].item(),
                                 self.loss.alpha,
                                 self.scheduler.get_lr()[0]))
 
             self.scheduler.step()
+            self.scheduler_dsdf.step()
+            self.scheduler_lights.step()
